@@ -1,0 +1,37 @@
+name: sub2api-local-dev
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    ports:
+      - "127.0.0.1:15432:5432"
+    environment:
+      POSTGRES_USER: sub2api_dev
+      POSTGRES_DB: sub2api_dev
+      POSTGRES_PASSWORD: ${DEV_POSTGRES_PASSWORD:?Run dev/Initialize.ps1 first}
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sub2api_dev -d sub2api_dev"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:8-alpine
+    ports:
+      - "127.0.0.1:16379:6379"
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${DEV_REDIS_PASSWORD:?Run dev/Initialize.ps1 first}"]
+    environment:
+      REDISCLI_AUTH: ${DEV_REDIS_PASSWORD:?Run dev/Initialize.ps1 first}
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  postgres-data:
+  redis-data:

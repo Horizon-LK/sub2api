@@ -83,3 +83,12 @@ deploy/redis_data/
 .claude/
 issues/
 CLAUDE.md
+
+# Custom development tooling, private keys and local operations are not image inputs
+/dev/
+/.ops/
+/.tools/
+*.pem
+*.key
+*.p12
+*.pfx

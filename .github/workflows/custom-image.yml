@@ -1,0 +1,149 @@
+name: Custom image
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Custom release version, for example 0.2.18-custom.1'
+        required: true
+        default: '0.2.18-custom.1'
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: custom-image-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    if: github.ref == 'refs/heads/custom'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      image: ${{ steps.release.outputs.image }}
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+      date: ${{ steps.release.outputs.date }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Require successful CI for this exact commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          run_id="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow backend-ci.yml \
+            --commit "$GITHUB_SHA" --branch custom --event push --status success \
+            --limit 1 --json databaseId --jq '.[0].databaseId // empty')"
+          if [[ -z "$run_id" ]]; then
+            echo 'CI must succeed for this custom commit before publishing.' >&2
+            exit 1
+          fi
+          echo "Verified CI: https://github.com/$GITHUB_REPOSITORY/actions/runs/$run_id"
+      - name: Prepare fixed release identity
+        id: release
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+-custom\.[1-9][0-9]*$ ]]; then
+            echo 'Use a version such as 0.2.18-custom.1.' >&2
+            exit 1
+          fi
+          if git ls-files | grep -Ei '(^|/)(\.env(\.(local|production|development))?|id_rsa|id_ed25519)$|\.(pem|key|p12|pfx)$'; then
+            echo 'Credential-like files must not be committed or published.' >&2
+            exit 1
+          fi
+          echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+          echo "tag=$RELEASE_VERSION-${GITHUB_SHA:0:12}" >> "$GITHUB_OUTPUT"
+          echo "version=$RELEASE_VERSION" >> "$GITHUB_OUTPUT"
+          echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Refuse an existing release tag
+        env:
+          IMAGE: ${{ needs.verify.outputs.image }}
+          TAG: ${{ needs.verify.outputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          package_status="$(curl --silent --show-error --output /tmp/package.json --write-out '%{http_code}' \
+            --header "Authorization: Bearer $GH_TOKEN" --header 'Accept: application/vnd.github+json' \
+            "https://api.github.com/users/$GITHUB_REPOSITORY_OWNER/packages/container/${GITHUB_REPOSITORY#*/}")"
+          case "$package_status" in
+            404) echo 'First publication of this package.'; exit 0 ;;
+            200) ;;
+            *) cat /tmp/package.json >&2; exit 1 ;;
+          esac
+          if docker buildx imagetools inspect "$IMAGE:$TAG" > /tmp/image-inspect.log 2>&1; then
+            echo 'This release tag already exists. Choose a new custom release number.' >&2
+            exit 1
+          fi
+          if ! grep -Eqi 'manifest unknown|not found|name unknown' /tmp/image-inspect.log; then
+            cat /tmp/image-inspect.log >&2
+            exit 1
+          fi
+      - name: Build and publish AMD64 application with embedded frontend
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ needs.verify.outputs.image }}:${{ needs.verify.outputs.tag }}
+          build-args: |
+            VERSION=${{ needs.verify.outputs.version }}
+            COMMIT=${{ github.sha }}
+            DATE=${{ needs.verify.outputs.date }}
+            GOPROXY=https://proxy.golang.org,direct
+            GOSUMDB=sum.golang.org
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.verify.outputs.version }}
+            org.opencontainers.image.created=${{ needs.verify.outputs.date }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Verify published image and record immutable reference
+        env:
+          IMAGE: ${{ needs.verify.outputs.image }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          set -euo pipefail
+          reference="$IMAGE@$DIGEST"
+          docker pull "$reference"
+          docker run --rm --entrypoint /app/sub2api "$reference" -version 2>&1 | tee /tmp/version.txt
+          grep -F "$VERSION" /tmp/version.txt
+          docker run --rm --entrypoint /usr/local/bin/pg_dump "$reference" --version
+          printf '%s\n' "$reference" > image-reference.txt
+          {
+            echo '### Verified custom image'
+            echo "- Source commit: $GITHUB_SHA"
+            echo "- Image: \`$reference\`"
+            echo '- Deploy using the digest, not latest.'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: image-reference
+          path: image-reference.txt
+          retention-days: 30
