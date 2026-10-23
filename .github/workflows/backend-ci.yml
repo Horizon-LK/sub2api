@@ -15,6 +15,9 @@ jobs:
       - name: Check deployment scripts
         run: |
           /bin/bash -n deploy/apple-container.sh
+          /bin/bash -n deploy/custom/install-host.sh
+          /bin/sh -n deploy/custom/reload-nginx.sh
+          python3 -c "import ast,pathlib; [ast.parse(p.read_text()) for p in pathlib.Path('deploy/custom').glob('*.py')]"
           /bin/bash deploy/tests/apple-container-test.sh
           /bin/sh deploy/tests/docker-compose-security-test.sh
           /bin/sh deploy/tests/docker-compose-gateway-env-test.sh
